@@ -1,3 +1,6 @@
+A plugin that aims to boost server performance utilization through forced settings, raise energy-saving thresholds during idle periods, and reduce performance degradation on low-end servers caused by memory overflow and accumulated cache/temp junk from daily use.
+
+
 Feature List — System Power Maintainer (v2.3)
 
 1. CPU Frequency Scheduling (Power Management)
