@@ -23,7 +23,9 @@ High Power Thresholds	Min/Max processor state percentages (default 60% / 100%)
 Feature	Description
 
 Process Whitelist	Forces high performance while listed processes are running (e.g. ffmpeg.exe); applies to both modes
+
 Ignore Local Access	Local IPs and whitelisted IPs do not trigger high performance (listen mode only)
+
 IP Whitelist	Supports single IPs, localhost, and IPv4 CIDR (e.g. 10.0.0.0/24); listen mode only
 
 4. System Maintainer
