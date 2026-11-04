@@ -1,6 +1,6 @@
 exports.version = 2.4
 exports.apiRequired = 10
-exports.description = "System power governor + maintainer: CPU frequency switching by listen/schedule mode, RAMMap working set release, process cleanup, temp file cleanup. All lists are user-editable."
+exports.description = "Power governor + maintainer: boosts performance via forced CPU frequency, raises idle energy-saving thresholds, mitigates low-end server degradation from memory overflow and cache/temp junk. Supports listen/schedule modes, RAMMap release, process & temp cleanup."
 exports.repo = "Hug3O/System-Power-Maintainer"
 
 // ============================================================
