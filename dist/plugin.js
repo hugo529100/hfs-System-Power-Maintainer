@@ -1,4 +1,4 @@
-exports.version = 2.4
+exports.version = 2.5
 exports.apiRequired = 10
 exports.description = "Power governor + maintainer: boosts performance via forced CPU frequency, raises idle energy-saving thresholds, mitigates low-end server degradation from memory overflow and cache/temp junk. Supports listen/schedule modes, RAMMap release, process & temp cleanup."
 exports.repo = "Hug3O/System-Power-Maintainer"
@@ -7,7 +7,7 @@ exports.repo = "Hug3O/System-Power-Maintainer"
 // Internal constants (not exposed in UI)
 // ============================================================
 const RAMMAP_ARGS = '-Ew'
-const RAMMAP_THRESHOLD_MB_DEFAULT = 300
+const RAMMAP_THRESHOLD_MB_DEFAULT = 150
 
 exports.config = {
   // ============================================
@@ -219,7 +219,7 @@ exports.config = {
     type: 'boolean',
     defaultValue: true,
     label: 'Enable RAMMap Working Set Release',
-    helperText: 'When enabled, RAMMap64.exe is called to release working sets when this process RSS exceeds the configured threshold.',
+    helperText: 'When enabled, RAMMap64.exe is called to release working sets after this process RSS exceeds the configured threshold AND the system has been idle for the configured interval.',
     xs: 12
   },
   ramMapIntervalMinutes: {
@@ -227,8 +227,8 @@ exports.config = {
     type: 'number',
     defaultValue: 10,
     min: 1,
-    label: 'RAMMap Check Interval (minutes)',
-    helperText: 'How often to check whether RAMMap should be triggered.',
+    label: 'RAMMap Idle Interval (minutes)',
+    helperText: 'After the last frontend access or whitelist process activity, wait this many minutes of idle before triggering RAMMap working set release. It will not run while the system is actively being used.',
     xs: 6,
     when: config => config.enableRamMap === true
   },
@@ -247,7 +247,7 @@ exports.config = {
     type: 'boolean',
     defaultValue: true,
     label: 'Enable Process Cleanup',
-    helperText: 'Periodically kill the processes listed below.',
+    helperText: 'Periodically kill the processes listed below, but only after the configured idle interval.',
     xs: 12
   },
   killIntervalMinutes: {
@@ -255,8 +255,8 @@ exports.config = {
     type: 'number',
     defaultValue: 60,
     min: 5,
-    label: 'Process Cleanup Interval (minutes)',
-    helperText: 'How often to run the process cleanup.',
+    label: 'Process Cleanup Idle Interval (minutes)',
+    helperText: 'After the last frontend access or whitelist process activity, wait this many minutes of idle before running the process cleanup. Avoids killing processes during active use.',
     xs: 6,
     when: config => config.enableKill === true
   },
@@ -309,7 +309,7 @@ AutoUpdate.exe`,
 %userprofile%\\AppData\\Roaming\\Tencent\\Logs
 %userprofile%\\Documents\\Youku Files\\ikudisk`,
     label: 'Temp Paths to Clean (one per line)',
-    helperText: 'Enter one path per line. Contents of these folders will be deleted with del /f /s /q.\nEnvironment variables like %userprofile% and %systemdrive% are supported.\nLines starting with # are ignored.',
+    helperText: 'Enter one path per line. Contents of these folders will be deleted with del /f /s /q /a.\nEnvironment variables like %userprofile% and %systemdrive% are supported.\nOnly add true temp directories; /a will also remove hidden/system files.\nLines starting with # are ignored.',
     xs: 12,
     when: config => config.enableTempClean === true
   },
@@ -332,7 +332,7 @@ C:\\Users\\monst\\AppData\\Roaming\\youku\\upgrade`,
     type: 'boolean',
     defaultValue: true,
     label: 'Also Empty Recycle Bin',
-    helperText: 'When enabled, the recycle bin will also be emptied during temp cleanup.',
+    helperText: 'When enabled, the recycle bin will also be emptied during temp cleanup using PowerShell Clear-RecycleBin.',
     xs: 12,
     when: config => config.enableTempClean === true
   },
@@ -378,6 +378,11 @@ exports.init = api => {
   let configWatcher = null
   let isApplying = false
   let localIpCache = new Set()
+
+  // === Idle tracking for maintainer ===
+  let lastActivityTime = Date.now()
+  let lastRamMapRunTime = 0
+  let lastKillRunTime = 0
 
   const maintainerTimers = []
 
@@ -439,6 +444,13 @@ exports.init = api => {
   // ============================================================
   const log = (msg) => {
     if (getConfig('debug')) api.log(msg)
+  }
+
+  // ============================================================
+  // === Activity tracking (for idle-triggered maintainer) ===
+  // ============================================================
+  const markActivity = () => {
+    lastActivityTime = Date.now()
   }
 
   // ============================================================
@@ -666,6 +678,7 @@ exports.init = api => {
     const mode = getConfig('scheduleMode') || 'listen'
 
     if (isForcedProcessRunning()) {
+      markActivity()
       goHighPerformance('whitelist process running')
       return
     }
@@ -694,6 +707,7 @@ exports.init = api => {
     processCheckTimer = setInterval(() => {
       if (!getConfig('enableControl')) return
       if (isForcedProcessRunning() && currentMode !== 'high') {
+        markActivity()
         goHighPerformance('process polling detected whitelist process')
       }
     }, getProcessCheckMs())
@@ -748,7 +762,7 @@ exports.init = api => {
   }
 
   // ============================================================
-  // === Maintainer: RAMMap (result only) ===
+  // === Maintainer: RAMMap (idle-triggered) ===
   // ============================================================
   const getRamMapPath = () => {
     const pluginDir = __dirname
@@ -788,16 +802,26 @@ exports.init = api => {
 
   const scheduleRamMapCheck = () => {
     if (!getConfig('enableRamMap')) return
-    const ms = (getConfig('ramMapIntervalMinutes') || 5) * 60_000
-    const t = setTimeout(() => {
-      doRamMapIfNeeded()
-      scheduleRamMapCheck()
-    }, ms)
+
+    const t = setInterval(() => {
+      if (!getConfig('enableRamMap')) return
+
+      const now = Date.now()
+      const idleMs = (getConfig('ramMapIntervalMinutes') || 5) * 60_000
+      const idleFor = now - lastActivityTime
+
+      // 仅当空闲达标，且本空闲周期内尚未执行过，才执行一次
+      if (idleFor >= idleMs && lastRamMapRunTime < lastActivityTime) {
+        doRamMapIfNeeded()
+        lastRamMapRunTime = Date.now()
+      }
+    }, 30_000)
+
     maintainerTimers.push(t)
   }
 
   // ============================================================
-  // === Maintainer: Process cleanup (result only) ===
+  // === Maintainer: Process cleanup (idle-triggered) ===
   // ============================================================
   const killProcesses = () => {
     if (!getConfig('enableKill')) return
@@ -823,16 +847,25 @@ exports.init = api => {
 
   const scheduleKill = () => {
     if (!getConfig('enableKill')) return
-    const ms = (getConfig('killIntervalMinutes') || 60) * 60_000
-    const t = setTimeout(() => {
-      killProcesses()
-      scheduleKill()
-    }, ms)
+
+    const t = setInterval(() => {
+      if (!getConfig('enableKill')) return
+
+      const now = Date.now()
+      const idleMs = (getConfig('killIntervalMinutes') || 60) * 60_000
+      const idleFor = now - lastActivityTime
+
+      if (idleFor >= idleMs && lastKillRunTime < lastActivityTime) {
+        killProcesses()
+        lastKillRunTime = Date.now()
+      }
+    }, 60_000)
+
     maintainerTimers.push(t)
   }
 
   // ============================================================
-  // === Maintainer: Temp file cleanup (result only) ===
+  // === Maintainer: Temp file cleanup ===
   // ============================================================
   const cleanTemp = () => {
     if (!getConfig('enableTempClean')) return
@@ -841,11 +874,12 @@ exports.init = api => {
     let cleaned = 0
     let removed = 0
     let failed = 0
+    let recycleOk = null
 
     const tempPaths = parseLines(getConfig('tempPaths'))
     for (const p of tempPaths) {
       try {
-        execSync(`del /f /s /q "${p}\\*.*" 2>nul`, { windowsHide: true, shell: 'cmd.exe' })
+        execSync(`del /f /s /q /a "${p}\\*.*" 2>nul`, { windowsHide: true, shell: 'cmd.exe' })
         cleaned++
       } catch (e) {
         failed++
@@ -864,11 +898,18 @@ exports.init = api => {
 
     if (getConfig('enableRecycleClean')) {
       try {
-        execSync('del /f /s /q %systemdrive%\\recycled\\*.* 2>nul', { windowsHide: true, shell: 'cmd.exe' })
-      } catch (e) {}
+        execSync(
+          'powershell -NoProfile -Command "Clear-RecycleBin -Force -ErrorAction SilentlyContinue"',
+          { windowsHide: true, timeout: 60000 }
+        )
+        recycleOk = true
+      } catch (e) {
+        recycleOk = false
+        log(`[SPM] Recycle bin clear failed: ${e.message}`)
+      }
     }
 
-    log(`[SPM] Temp cleanup done: ${cleaned} paths, ${removed} dirs removed, ${failed} failed (${Date.now() - t0}ms)`)
+    log(`[SPM] Temp cleanup done: ${cleaned} paths, ${removed} dirs removed, ${failed} failed, recycle ${recycleOk === null ? 'skipped' : recycleOk ? 'ok' : 'failed'} (${Date.now() - t0}ms)`)
   }
 
   const scheduleTemp = () => {
@@ -885,17 +926,19 @@ exports.init = api => {
   // === Maintainer: Restart on config change ===
   // ============================================================
   const stopMaintainer = () => {
-    for (const t of maintainerTimers) clearTimeout(t)
+    for (const t of maintainerTimers) {
+      clearInterval(t)
+      clearTimeout(t)
+    }
     maintainerTimers.length = 0
   }
 
   const startMaintainer = () => {
+    // 首次不立即清理，避免启动瞬间在活跃状态下触发
     if (getConfig('enableRamMap')) {
-      doRamMapIfNeeded()
       scheduleRamMapCheck()
     }
     if (getConfig('enableKill')) {
-      killProcesses()
       scheduleKill()
     }
     if (getConfig('enableTempClean')) {
@@ -916,6 +959,7 @@ exports.init = api => {
     refreshLocalIps()
     lastConfigHash = getConfigHash()
     lastScheduleMode = getConfig('scheduleMode') || 'listen'
+    lastActivityTime = Date.now()
 
     if (getConfig('enableControl')) {
       setTimeout(() => {
@@ -948,6 +992,8 @@ exports.init = api => {
 
         const clientIp = getClientIp(ctx)
         if (isLocalOrWhitelisted(clientIp)) return
+
+        markActivity()
 
         if (currentMode !== 'high') {
           goHighPerformance(`frontend access from ${clientIp}`)
@@ -1008,12 +1054,17 @@ exports.init = api => {
             tempIntervalMinutes: getConfig('tempIntervalMinutes'),
             tempPaths: parseLines(getConfig('tempPaths')),
             tempDirsToRemove: parseLines(getConfig('tempDirsToRemove')),
-            enableRecycleClean: getConfig('enableRecycleClean')
+            enableRecycleClean: getConfig('enableRecycleClean'),
+            lastActivityTime: new Date(lastActivityTime).toISOString(),
+            idleMinutes: Math.floor((Date.now() - lastActivityTime) / 60000),
+            lastRamMapRunTime: lastRamMapRunTime > 0 ? new Date(lastRamMapRunTime).toISOString() : null,
+            lastKillRunTime: lastKillRunTime > 0 ? new Date(lastKillRunTime).toISOString() : null
           }
         }
       },
 
       async forceHighPower() {
+        markActivity()
         goHighPerformance('manual override')
         return { message: 'Switched to high performance', currentMode }
       },
