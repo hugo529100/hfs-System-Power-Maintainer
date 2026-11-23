@@ -3,7 +3,6 @@ exports.apiRequired = 10
 exports.description = "Power governor + maintainer: boosts performance via forced CPU frequency, raises idle energy-saving thresholds, mitigates low-end server degradation from memory overflow and cache/temp junk. Supports listen/schedule modes, RAMMap release, process & temp cleanup."
 exports.repo = "hugo529100/hfs-System-Power-Maintainer"
 
-
 // ============================================================
 // Internal constants (not exposed in UI)
 // ============================================================
